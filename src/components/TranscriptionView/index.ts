@@ -1,0 +1,1 @@
+export { TranscriptionView } from './TranscriptionView'; 
