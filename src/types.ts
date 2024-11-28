@@ -1,5 +1,5 @@
 export interface TranscriptionMessage {
-  id?: string;
   text: string;
-  // ... other properties
+  timestamp: number;
+  mode: 'system' | 'user' | 'both';
 } 
