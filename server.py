@@ -65,7 +65,7 @@ class AudioProcessor:
             raise ValueError(f"Invalid audio file path: {audio_file_path}")
 
         try:
-            audio_file_path_url = f"http://0.0.0.0:5000/voice/{audio_file_path}"
+            audio_file = genai.upload_file(path=audio_file_path)
             # Create prompt for Gemini
             prompt = f"""
             Please transcribe this audio file and provide a clear, well-formatted transcription.
@@ -74,7 +74,7 @@ class AudioProcessor:
             """
 
             # Send to Gemini with audio data - add await here
-            response =  model.generate_content([prompt, audio_file_path_url])
+            response =  model.generate_content([prompt, audio_file])
             print('Transcription: ', response.text)
             # Get the text directly from response
             return response.text
