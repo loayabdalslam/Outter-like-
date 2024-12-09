@@ -1,4 +1,4 @@
-from flask import Flask,send_from_directory
+from flask import Flask, send_from_directory
 from flask_cors import CORS
 import logging
 from flask_socketio import SocketIO
@@ -10,17 +10,16 @@ import queue
 import time
 import os
 from datetime import datetime
-import google.generativeai as genai
-from dotenv import load_dotenv
 import base64
 import asyncio
+from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+import torch
+import torchaudio
+import librosa
 
-# Load environment variables
-load_dotenv()
-
-# Configure Google Gemini
-genai.configure(api_key="AIzaSyA-Ayj7gvkSjdFdwlFBgUcRWTz9lPYEb5U")
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Initialize Hugging Face model
+processor = AutoProcessor.from_pretrained("MohamedRashad/Arabic-Whisper-CodeSwitching-Edition")
+model = AutoModelForSpeechSeq2Seq.from_pretrained("MohamedRashad/Arabic-Whisper-CodeSwitching-Edition")
 
 app = Flask(__name__)
 CORS(app)
@@ -55,37 +54,55 @@ class AudioProcessor:
         self.last_process_time = time.time()
         self.buffer = np.array([], dtype=np.float32)
         self.loop = asyncio.new_event_loop()
- 
 
+    def stop_processing(self):
+        """Stop the audio processing thread"""
+        self.is_running = False
+        if self.processing_thread is not None:
+            self.processing_thread.join()
+        if self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        logger.info("Audio processing thread stopped")
 
-    async def process_with_gemini(self, audio_file_path: str) -> str:
-        """Process audio file directly with Gemini AI"""
-
+    async def process_with_huggingface(self, audio_file_path: str) -> str:
+        """Process audio file with Hugging Face model"""
         if not os.path.isfile(audio_file_path):
             raise ValueError(f"Invalid audio file path: {audio_file_path}")
 
         try:
-            audio_file = genai.upload_file(path=audio_file_path)
-            # Create prompt for Gemini
-            prompt = f"""
-            Please transcribe this audio file and provide a clear, well-formatted transcription.
-            The audio is a WAV file containing speech that needs to be transcribed accurately.
-            Please maintain natural speech patterns and include proper punctuation.
-            """
 
-            # Send to Gemini with audio data - add await here
-            response =  model.generate_content([prompt, audio_file])
-            print('Transcription: ', response.text)
-            # Get the text directly from response
-            return response.text
-        except (IOError, ConnectionError) as e:
-            logger.error(f"Error processing audio with Gemini: {e} (File: {audio_file_path})")
-            return "Error processing audio"
+
+            # Load audio file
+            audio_data, sample_rate = librosa.load(audio_file_path)
+
+            # Resample audio data to 16000 Hz
+            resampled_audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
+
+            # Process audio with the processor
+            #inputs = processor(resampled_audio_data, sampling_rate=16000, return_tensors="pt")
+
+
+            # Load audio file
+            #waveform, sample_rate = torchaudio.load(audio_file_path)
+
+            # Process audio with the processor
+            inputs = processor(resampled_audio_data, sampling_rate=sample_rate, return_tensors="pt")
+
+            # Generate transcription with the model
+            with torch.no_grad():
+                generated_ids = model.generate(inputs["input_features"])
+
+            # Decode the generated ids to text
+            transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+            # The transcription is a list, so we join it into a single string
+            result = " ".join(transcription)
+            print('Transcription: ', result)
+            return result
         except Exception as e:
             logger.exception(f"Unexpected error processing audio: {e}")
             return ""
-    
-    
+
     def process_audio_chunk(self, audio_data: np.ndarray, timestamp: int, mode: str):
         try:
             self.buffer = np.append(self.buffer, audio_data)
@@ -108,7 +125,7 @@ class AudioProcessor:
                 logger.info(f"Saved audio file: {filename}")
 
                 future = asyncio.run_coroutine_threadsafe(
-                    self.process_with_gemini(filepath), 
+                    self.process_with_huggingface(filepath), 
                     self.loop
                 )
                 transcription = future.result()
@@ -129,54 +146,46 @@ class AudioProcessor:
             self.buffer = np.array([], dtype=np.float32)
 
     def start_processing(self):
-        """Start the audio processing thread"""
-        self.is_running = True
-        def run_event_loop():
-            asyncio.set_event_loop(self.loop)
-            self.loop.run_forever()
-        
-        threading.Thread(target=run_event_loop, daemon=True).start()
-        self.processing_thread = threading.Thread(target=self.process_audio_queue)
-        self.processing_thread.daemon = True
-        self.processing_thread.start()
-        logger.info("Audio processing thread started")
+            """Start the audio processing thread"""
+            self.is_running = True
+            def run_event_loop():
+                asyncio.set_event_loop(self.loop)
+                self.loop.run_forever()
+            
+            threading.Thread(target=run_event_loop, daemon=True).start()
+            self.processing_thread = threading.Thread(target=self.process_audio_queue)
+            self.processing_thread.daemon = True
+            self.processing_thread.start()
+            logger.info("Audio processing thread started")
 
-    def stop_processing(self):
-        """Stop the audio processing thread"""
-        self.is_running = False
-        self.audio_queue.put(None)  # Signal to stop
-        if self.processing_thread:
-            self.processing_thread.join()
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        logger.info("Audio processing thread stopped")
 
     def process_audio_queue(self):
-        """Main audio processing loop"""
-        buffer = np.array([], dtype=np.float32)
-        last_process_time = time.time()
+            """Main audio processing loop"""
+            buffer = np.array([], dtype=np.float32)
+            last_process_time = time.time()
 
-        while self.is_running:
-            try:
+            while self.is_running:
                 try:
-                    audio_data = self.audio_queue.get(timeout=5.0)
-                    if audio_data is None:
-                        break
-                    
-                    buffer = np.append(buffer, audio_data)
-                    current_time = time.time()
-                    
-                    # Process buffer when it's large enough (5 seconds of audio)
-                    if len(buffer) >= 220500:  # 5 seconds at 44.1kHz
-                        self.process_audio_chunk(buffer, int(current_time * 1000), 'both')
-                        buffer = np.array([], dtype=np.float32)
-                        last_process_time = current_time
+                    try:
+                        audio_data = self.audio_queue.get(timeout=5.0)
+                        if audio_data is None:
+                            break
                         
-                except queue.Empty:
-                    continue
+                        buffer = np.append(buffer, audio_data)
+                        current_time = time.time()
+                        
+                        # Process buffer when it's large enough (5 seconds of audio)
+                        if len(buffer) >= 220500:  # 5 seconds at 44.1kHz
+                            self.process_audio_chunk(buffer, int(current_time * 1000), 'both')
+                            buffer = np.array([], dtype=np.float32)
+                            last_process_time = current_time
+                        
+                    except queue.Empty:
+                        continue
 
-            except Exception as e:
-                logger.error(f"Error in process_audio_queue: {e}", exc_info=True)
-                buffer = np.array([], dtype=np.float32)
+                except Exception as e:
+                    logger.error(f"Error in process_audio_queue: {e}", exc_info=True)
+                    buffer = np.array([], dtype=np.float32)
 
 # Create audio processor instance
 audio_processor = AudioProcessor()
