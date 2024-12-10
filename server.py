@@ -1,44 +1,31 @@
+#%%
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 import logging
 from flask_socketio import SocketIO
 import numpy as np
 import wave
-import io
-import threading
 import queue
 import time
 import os
-from datetime import datetime
-import base64
 import asyncio
 from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
 import torch
-import torchaudio
 import librosa
-
+import csv
+from datetime import datetime
+#%%
+TIMING_CSV = "processing_times.csv"
+if not os.path.exists(TIMING_CSV):
+    with open(TIMING_CSV, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Timestamp", "Chunk Duration (sec)", "Processing Time (sec)"])
+#%%
 # Initialize Hugging Face model
 processor = AutoProcessor.from_pretrained("MohamedRashad/Arabic-Whisper-CodeSwitching-Edition")
 model = AutoModelForSpeechSeq2Seq.from_pretrained("MohamedRashad/Arabic-Whisper-CodeSwitching-Edition")
-
-app = Flask(__name__)
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=120)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('audio_server.log')
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# Add socket.io logging
-logging.getLogger('socketio').setLevel(logging.DEBUG)
-logging.getLogger('engineio').setLevel(logging.DEBUG)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
 
 # Add this after app initialization
 VOICE_DIR = "voice"
@@ -64,29 +51,24 @@ class AudioProcessor:
             self.loop.call_soon_threadsafe(self.loop.stop)
         logger.info("Audio processing thread stopped")
 
-    async def process_with_huggingface(self, audio_file_path: str) -> str:
-        """Process audio file with Hugging Face model"""
+    async def process_with_huggingface(self, audio_file_path: str, chunk_duration: int = None) -> str:
+        """Process audio file with Hugging Face model, log timing."""
         if not os.path.isfile(audio_file_path):
             raise ValueError(f"Invalid audio file path: {audio_file_path}")
 
         try:
+            start_time = time.time()  # Start timing
 
+            # Load and process the audio file
+            audio_data, sample_rate = librosa.load(audio_file_path, sr=None)
 
-            # Load audio file
-            audio_data, sample_rate = librosa.load(audio_file_path)
+            # Resample audio data to 16000 Hz if it's not already
+            if sample_rate != 16000:
+                logger.info(f"Resampling audio from {sample_rate} Hz to 16000 Hz")
+                audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
 
-            # Resample audio data to 16000 Hz
-            resampled_audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
-
-            # Process audio with the processor
-            #inputs = processor(resampled_audio_data, sampling_rate=16000, return_tensors="pt")
-
-
-            # Load audio file
-            #waveform, sample_rate = torchaudio.load(audio_file_path)
-
-            # Process audio with the processor
-            inputs = processor(resampled_audio_data, sampling_rate=sample_rate, return_tensors="pt")
+            # Prepare the input for the model
+            inputs = processor(audio_data, sampling_rate=16000, return_tensors="pt")
 
             # Generate transcription with the model
             with torch.no_grad():
@@ -94,10 +76,20 @@ class AudioProcessor:
 
             # Decode the generated ids to text
             transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)
-
-            # The transcription is a list, so we join it into a single string
             result = " ".join(transcription)
-            print('Transcription: ', result)
+
+            # Measure processing time
+            end_time = time.time()
+            processing_time = end_time - start_time
+
+            # Log timing to CSV
+            with open(TIMING_CSV, 'a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([datetime.now().isoformat(), chunk_duration, processing_time])
+
+            logger.info(f"Processing Time: {processing_time:.2f} seconds for duration: {chunk_duration} sec")
+            logger.info(f"Transcription result: {result}")
+
             return result
         except Exception as e:
             logger.exception(f"Unexpected error processing audio: {e}")
@@ -106,11 +98,16 @@ class AudioProcessor:
     def process_audio_chunk(self, audio_data: np.ndarray, timestamp: int, mode: str):
         try:
             self.buffer = np.append(self.buffer, audio_data)
-            current_time = time.time()
+            chunk_samples = 44100 * 3  # 3 seconds worth of audio at 44.1kHz
 
-            if current_time - self.last_process_time >= 5 and len(self.buffer) > 0:
-                logger.info(f"Processing {len(self.buffer)} samples")
-                
+            while len(self.buffer) >= chunk_samples:
+                # Extract a chunk of audio data
+                chunk = self.buffer[:chunk_samples]
+                self.buffer = self.buffer[chunk_samples:]
+
+                logger.info(f"Processing chunk of {len(chunk)} samples")
+
+                # Save the chunk to a temporary file
                 timestamp_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y%m%d_%H%M%S')
                 filename = f"{timestamp_str}_{mode}.wav"
                 filepath = os.path.join(self.voice_dir, filename)
@@ -119,83 +116,75 @@ class AudioProcessor:
                     wav_file.setnchannels(1)
                     wav_file.setsampwidth(2)
                     wav_file.setframerate(44100)
-                    audio_16bit = (self.buffer * 32767).astype(np.int16)
+                    audio_16bit = (chunk * 32767).astype(np.int16)
                     wav_file.writeframes(audio_16bit.tobytes())
 
-                logger.info(f"Saved audio file: {filename}")
+                logger.info(f"Saved audio chunk: {filename}")
 
+                # Transcribe the chunk
                 future = asyncio.run_coroutine_threadsafe(
-                    self.process_with_huggingface(filepath), 
+                    self.process_with_huggingface(filepath),
                     self.loop
                 )
                 transcription = future.result()
-                
+
+                # Emit the transcription
                 if transcription:
                     socketio.emit('transcription', {
                         'text': transcription,
                         'timestamp': timestamp,
                         'mode': mode
                     })
-                    logger.info(f"Transcription: {transcription}")
+                    logger.info(f"Chunk Transcription: {transcription}")
 
-                self.buffer = np.array([], dtype=np.float32)
-                self.last_process_time = current_time
+            # Update the last process time to throttle processing
+            self.last_process_time = time.time()
 
         except Exception as e:
             logger.error(f"Error processing audio chunk: {e}", exc_info=True)
             self.buffer = np.array([], dtype=np.float32)
 
-    def start_processing(self):
-            """Start the audio processing thread"""
-            self.is_running = True
-            def run_event_loop():
-                asyncio.set_event_loop(self.loop)
-                self.loop.run_forever()
-            
-            threading.Thread(target=run_event_loop, daemon=True).start()
-            self.processing_thread = threading.Thread(target=self.process_audio_queue)
-            self.processing_thread.daemon = True
-            self.processing_thread.start()
-            logger.info("Audio processing thread started")
-
-
-    def process_audio_queue(self):
-            """Main audio processing loop"""
-            buffer = np.array([], dtype=np.float32)
-            last_process_time = time.time()
-
-            while self.is_running:
-                try:
-                    try:
-                        audio_data = self.audio_queue.get(timeout=5.0)
-                        if audio_data is None:
-                            break
-                        
-                        buffer = np.append(buffer, audio_data)
-                        current_time = time.time()
-                        
-                        # Process buffer when it's large enough (5 seconds of audio)
-                        if len(buffer) >= 220500:  # 5 seconds at 44.1kHz
-                            self.process_audio_chunk(buffer, int(current_time * 1000), 'both')
-                            buffer = np.array([], dtype=np.float32)
-                            last_process_time = current_time
-                        
-                    except queue.Empty:
-                        continue
-
-                except Exception as e:
-                    logger.error(f"Error in process_audio_queue: {e}", exc_info=True)
-                    buffer = np.array([], dtype=np.float32)
 
 # Create audio processor instance
 audio_processor = AudioProcessor()
+#%%
+app = Flask(__name__)
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=120)
 
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('audio_server.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Add socket.io logging
+logging.getLogger('socketio').setLevel(logging.DEBUG)
+logging.getLogger('engineio').setLevel(logging.DEBUG)
 
 @app.route('/voice/<path:filename>')
 def serve_voice_files(filename):
     return send_from_directory('voice', filename)
 
-
+@app.route('/transcribe/<filename>')
+def transcribe_file(filename):
+    file_path = os.path.join(VOICE_DIR, filename)
+    if not os.path.isfile(file_path):
+        return {"error": "File not found"}, 404
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        transcription = loop.run_until_complete(audio_processor.process_with_huggingface(file_path))
+        loop.close()
+        return transcription, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception as e:
+        logger.error(f"Error in transcription: {e}", exc_info=True)
+        return {"error": str(e)}, 500
 
 @socketio.on('connect')
 def handle_connect():
@@ -217,15 +206,16 @@ def handle_audio_data(data):
         audio_array = np.frombuffer(data['buffer'], dtype=np.float32)
         timestamp = data.get('timestamp', int(time.time() * 1000))
         mode = data.get('mode', 'both')
-        
+
         if len(audio_array) > 0:
             logger.debug(f"Received audio chunk - Length: {len(audio_array)}, Mode: {mode}")
             audio_processor.process_audio_chunk(audio_array, timestamp, mode)
     except Exception as e:
         logger.error(f"Error handling audio data: {e}", exc_info=True)
-
+#%%
 if __name__ == '__main__':
     try:
-        socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+        socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
     finally:
         audio_processor.stop_processing()
+        print('Processing is done')
