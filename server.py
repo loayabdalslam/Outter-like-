@@ -15,6 +15,9 @@ from dotenv import load_dotenv
 import base64
 import asyncio
 
+from sympy import false
+from torch.distributed.pipelining.microbatch import merge_chunks
+
 # Load environment variables
 load_dotenv()
 
@@ -34,7 +37,7 @@ logging.basicConfig(
         logging.StreamHandler(),
         logging.FileHandler('audio_server.log')
     ]
-)
+    )
 logger = logging.getLogger(__name__)
 
 # Add socket.io logging
@@ -58,7 +61,7 @@ class AudioProcessor:
  
 
 
-    async def process_with_gemini(self, audio_file_path: str) -> str:
+    async def process_with_gemini(self, audio_file_path: str, trancribe=True) -> str:
         """Process audio file directly with Gemini AI"""
 
         if not os.path.isfile(audio_file_path):
@@ -67,15 +70,26 @@ class AudioProcessor:
         try:
             audio_file = genai.upload_file(path=audio_file_path)
             # Create prompt for Gemini
-            prompt = f"""
-            Please transcribe this audio file and provide a clear, well-formatted transcription.
-            The audio is a WAV file containing speech that needs to be transcribed accurately.
-            Please maintain natural speech patterns and include proper punctuation.
-            """
+            if trancribe:
+
+                prompt = f"""
+                Please transcribe this audio file and provide a clear, well-formatted transcription.
+                The audio is a WAV file containing speech that needs to be transcribed accurately.
+                Please maintain natural speech patterns and include proper punctuation.
+                """
+            else:
+                prompt = f"""
+                                Please summarize the content of this audio file and provide a clear, well-formatted summary.
+                                The audio is a WAV file containing speech that needs to be summarized accurately.
+                                Please maintain natural speech patterns and include proper punctuation.
+                                """
 
             # Send to Gemini with audio data - add await here
             response =  model.generate_content([prompt, audio_file])
-            print('Transcription: ', response.text)
+            if trancribe:
+                print('Summary: ', response.text)
+            else:
+                print('Transcription: ', response.text)
             # Get the text directly from response
             return response.text
         except (IOError, ConnectionError) as e:
@@ -84,8 +98,50 @@ class AudioProcessor:
         except Exception as e:
             logger.exception(f"Unexpected error processing audio: {e}")
             return ""
-    
-    
+    def merge_chuncks(self):
+        """Merge consecutive chunks into one"""
+        # Get the current directory of the script (server.py)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Define the folder path in the current directory
+        folder_path = os.path.join(current_dir, "voice")
+
+        output_folder = os.path.join(current_dir, "output")  # Path to `output` folder
+
+        # Check if folder exists
+        if os.path.exists(folder_path):
+            # List all files in the folder
+            files = os.listdir(folder_path)
+            with wave.open(os.path.join(folder_path,files[0]), 'rb') as first_wav:
+                params = first_wav.getparams()  # Get audio parameters (e.g., sample width, channels, etc.)
+                data = first_wav.readframes(first_wav.getnframes())  # Read all frames from the first file
+            # Iterate over the files
+            for file in files[1:]:
+                with wave.open(os.path.join(folder_path, file), 'rb') as wav_file:
+                    if wav_file.getparams() != params:
+                        raise ValueError(f"Audio format mismatch in {file}. All files must have the same format!")
+                    data += wav_file.readframes(wav_file.getnframes())  # Append audio frames
+            #save file
+            output_path = os.path.join(output_folder, "merged_audio.wav")
+            with wave.open(output_path, 'wb') as output_wav:
+                output_wav.setparams(params)  # Set the same parameters as the source files
+                output_wav.writeframes(data)  # Write combined frames
+            return output_path
+
+        else:
+            print(f"Folder '{folder_path}' does not exist.")
+            return None
+    def transcribe_file(self):
+        """Transcribe audio file"""
+        file=self.merge_chuncks()
+        if file:
+            transcription = asyncio.run_coroutine_threadsafe(
+                self.process_with_gemini(file,False),
+                self.loop
+            ).result()
+            return transcription
+        else:
+            return "Error processing audio"
     def process_audio_chunk(self, audio_data: np.ndarray, timestamp: int, mode: str):
         try:
             self.buffer = np.append(self.buffer, audio_data)
