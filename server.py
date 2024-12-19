@@ -1,269 +1,222 @@
-from flask import Flask,send_from_directory
+from flask import Flask, send_from_directory
 from flask_cors import CORS
-import logging
 from flask_socketio import SocketIO
 import numpy as np
 import wave
-import io
 import threading
-import queue
 import time
 import os
 from datetime import datetime
 import google.generativeai as genai
 from dotenv import load_dotenv
 import base64
-import asyncio
+import sys
+import logging
+from logging.handlers import RotatingFileHandler
 
-from sympy import false
-from torch.distributed.pipelining.microbatch import merge_chunks
+# Configure logging first
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        RotatingFileHandler('app.log', maxBytes=1024*1024, backupCount=5),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-# Configure Google Gemini
-genai.configure(api_key="AIzaSyA-Ayj7gvkSjdFdwlFBgUcRWTz9lPYEb5U")
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Configure Google Gemini with retry mechanism
+def init_gemini():
+    try:
+        genai.configure(api_key='AIzaSyAHpVJiE-Q6D-GYUO4KTxGh8ok1i58GZHQ')
+        return genai.GenerativeModel('gemini-1.5-flash')
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini: {e}")
+        return None
+
+model = init_gemini()
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=120)
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('audio_server.log')
-    ]
-    )
-logger = logging.getLogger(__name__)
+# Configure SocketIO with larger message size and ping settings
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    logger=True,
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25,
+    max_http_buffer_size=1e8,  # 100MB buffer
+    async_handlers=True
+)
 
-# Add socket.io logging
-logging.getLogger('socketio').setLevel(logging.DEBUG)
-logging.getLogger('engineio').setLevel(logging.DEBUG)
-
-# Add this after app initialization
+# Configure directories
 VOICE_DIR = "voice"
-if not os.path.exists(VOICE_DIR):
-    os.makedirs(VOICE_DIR)
+OUTPUT_DIR = "output"
+for dir in [VOICE_DIR, OUTPUT_DIR]:
+    if not os.path.exists(dir):
+        os.makedirs(dir)
 
 class AudioProcessor:
     def __init__(self):
-        self.audio_queue = queue.Queue()
-        self.processing_thread = None
-        self.is_running = False
-        self.voice_dir = VOICE_DIR
+        self.audio_buffer = np.array([], dtype=np.float32)
         self.last_process_time = time.time()
-        self.buffer = np.array([], dtype=np.float32)
-        self.loop = asyncio.new_event_loop()
- 
+        self.recordings = []
+        self.lock = threading.Lock()
+        self.transcription_errors = 0
+        self.max_retries = 3
 
-
-    async def process_with_gemini(self, audio_file_path: str, trancribe=True) -> str:
-        """Process audio file directly with Gemini AI"""
-
-        if not os.path.isfile(audio_file_path):
-            raise ValueError(f"Invalid audio file path: {audio_file_path}")
-
-        try:
-            audio_file = genai.upload_file(path=audio_file_path)
-            # Create prompt for Gemini
-            if trancribe:
-
-                prompt = f"""
-                Please transcribe this audio file and provide a clear, well-formatted transcription.
-                The audio is a WAV file containing speech that needs to be transcribed accurately.
-                Please maintain natural speech patterns and include proper punctuation.
-                """
-            else:
-                prompt = f"""
-                                Please summarize the content of this audio file and provide a clear, well-formatted summary.
-                                The audio is a WAV file containing speech that needs to be summarized accurately.
-                                Please maintain natural speech patterns and include proper punctuation.
-                                """
-
-            # Send to Gemini with audio data - add await here
-            response =  model.generate_content([prompt, audio_file])
-            if trancribe:
-                print('Summary: ', response.text)
-            else:
-                print('Transcription: ', response.text)
-            # Get the text directly from response
-            return response.text
-        except (IOError, ConnectionError) as e:
-            logger.error(f"Error processing audio with Gemini: {e} (File: {audio_file_path})")
-            return "Error processing audio"
-        except Exception as e:
-            logger.exception(f"Unexpected error processing audio: {e}")
-            return ""
-    def merge_chuncks(self):
-        """Merge consecutive chunks into one"""
-        # Get the current directory of the script (server.py)
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-
-        # Define the folder path in the current directory
-        folder_path = os.path.join(current_dir, "voice")
-
-        output_folder = os.path.join(current_dir, "output")  # Path to `output` folder
-
-        # Check if folder exists
-        if os.path.exists(folder_path):
-            # List all files in the folder
-            files = os.listdir(folder_path)
-            with wave.open(os.path.join(folder_path,files[0]), 'rb') as first_wav:
-                params = first_wav.getparams()  # Get audio parameters (e.g., sample width, channels, etc.)
-                data = first_wav.readframes(first_wav.getnframes())  # Read all frames from the first file
-            # Iterate over the files
-            for file in files[1:]:
-                with wave.open(os.path.join(folder_path, file), 'rb') as wav_file:
-                    if wav_file.getparams() != params:
-                        raise ValueError(f"Audio format mismatch in {file}. All files must have the same format!")
-                    data += wav_file.readframes(wav_file.getnframes())  # Append audio frames
-            #save file
-            output_path = os.path.join(output_folder, "merged_audio.wav")
-            with wave.open(output_path, 'wb') as output_wav:
-                output_wav.setparams(params)  # Set the same parameters as the source files
-                output_wav.writeframes(data)  # Write combined frames
-            return output_path
-
-        else:
-            print(f"Folder '{folder_path}' does not exist.")
-            return None
-    def transcribe_file(self):
-        """Transcribe audio file"""
-        file=self.merge_chuncks()
-        if file:
-            transcription = asyncio.run_coroutine_threadsafe(
-                self.process_with_gemini(file,False),
-                self.loop
-            ).result()
-            return transcription
-        else:
-            return "Error processing audio"
     def process_audio_chunk(self, audio_data: np.ndarray, timestamp: int, mode: str):
-        try:
-            self.buffer = np.append(self.buffer, audio_data)
-            current_time = time.time()
-
-            if current_time - self.last_process_time >= 5 and len(self.buffer) > 0:
-                logger.info(f"Processing {len(self.buffer)} samples")
-                
-                timestamp_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y%m%d_%H%M%S')
-                filename = f"{timestamp_str}_{mode}.wav"
-                filepath = os.path.join(self.voice_dir, filename)
-
-                with wave.open(filepath, 'wb') as wav_file:
-                    wav_file.setnchannels(1)
-                    wav_file.setsampwidth(2)
-                    wav_file.setframerate(44100)
-                    audio_16bit = (self.buffer * 32767).astype(np.int16)
-                    wav_file.writeframes(audio_16bit.tobytes())
-
-                logger.info(f"Saved audio file: {filename}")
-
-                future = asyncio.run_coroutine_threadsafe(
-                    self.process_with_gemini(filepath), 
-                    self.loop
-                )
-                transcription = future.result()
-                
-                if transcription:
-                    socketio.emit('transcription', {
-                        'text': transcription,
-                        'timestamp': timestamp,
-                        'mode': mode
-                    })
-                    logger.info(f"Transcription: {transcription}")
-
-                self.buffer = np.array([], dtype=np.float32)
-                self.last_process_time = current_time
-
-        except Exception as e:
-            logger.error(f"Error processing audio chunk: {e}", exc_info=True)
-            self.buffer = np.array([], dtype=np.float32)
-
-    def start_processing(self):
-        """Start the audio processing thread"""
-        self.is_running = True
-        def run_event_loop():
-            asyncio.set_event_loop(self.loop)
-            self.loop.run_forever()
-        
-        threading.Thread(target=run_event_loop, daemon=True).start()
-        self.processing_thread = threading.Thread(target=self.process_audio_queue)
-        self.processing_thread.daemon = True
-        self.processing_thread.start()
-        logger.info("Audio processing thread started")
-
-    def stop_processing(self):
-        """Stop the audio processing thread"""
-        self.is_running = False
-        self.audio_queue.put(None)  # Signal to stop
-        if self.processing_thread:
-            self.processing_thread.join()
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        logger.info("Audio processing thread stopped")
-
-    def process_audio_queue(self):
-        """Main audio processing loop"""
-        buffer = np.array([], dtype=np.float32)
-        last_process_time = time.time()
-
-        while self.is_running:
+        with self.lock:
             try:
-                try:
-                    audio_data = self.audio_queue.get(timeout=5.0)
-                    if audio_data is None:
-                        break
-                    
-                    buffer = np.append(buffer, audio_data)
-                    current_time = time.time()
-                    
-                    # Process buffer when it's large enough (5 seconds of audio)
-                    if len(buffer) >= 220500:  # 5 seconds at 44.1kHz
-                        self.process_audio_chunk(buffer, int(current_time * 1000), 'both')
-                        buffer = np.array([], dtype=np.float32)
-                        last_process_time = current_time
-                        
-                except queue.Empty:
-                    continue
+                self.audio_buffer = np.append(self.audio_buffer, audio_data)
+                current_time = time.time()
+
+                if current_time - self.last_process_time >= 5:
+                    if len(self.audio_buffer) > 0:
+                        self._process_buffer(timestamp)
+                    self.last_process_time = current_time
 
             except Exception as e:
-                logger.error(f"Error in process_audio_queue: {e}", exc_info=True)
-                buffer = np.array([], dtype=np.float32)
+                logger.error(f"Error processing audio chunk: {e}", exc_info=True)
+                self.audio_buffer = np.array([], dtype=np.float32)
+
+    def _process_buffer(self, timestamp: int):
+        try:
+            timestamp_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y%m%d_%H%M%S')
+            
+            if len(self.audio_buffer) > 0:
+                filepath = self._save_audio(self.audio_buffer, f"{timestamp_str}_recording.wav")
+                self.recordings.append({"path": filepath, "timestamp": timestamp})
+                self._process_recording(filepath, timestamp)
+                self.audio_buffer = np.array([], dtype=np.float32)
+        except Exception as e:
+            logger.error(f"Error in _process_buffer: {e}", exc_info=True)
+
+    def _save_audio(self, buffer: np.ndarray, filename: str) -> str:
+        filepath = os.path.join(VOICE_DIR, filename)
+        try:
+            with wave.open(filepath, 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(44100)
+                audio_16bit = (buffer * 32767).astype(np.int16)
+                wav_file.writeframes(audio_16bit.tobytes())
+            return filepath
+        except Exception as e:
+            logger.error(f"Error saving audio file: {e}", exc_info=True)
+            raise
+
+    def _process_recording(self, filepath: str, timestamp: int):
+        try:
+            transcription = self._transcribe_audio_with_retry(filepath)
+            if transcription:
+                socketio.emit('transcription', {
+                    'text': transcription,
+                    'timestamp': timestamp,
+                    'mode': 'recording'
+                })
+        except Exception as e:
+            logger.error(f"Error processing recording: {e}", exc_info=True)
+
+    def _transcribe_audio_with_retry(self, audio_path: str, retries=0) -> str:
+        try:
+            if not model:
+                return "Transcription service unavailable"
+                
+            audio_file = genai.upload_file(path=audio_path)
+            prompt = """
+            Please transcribe this audio file and provide a clear, well-formatted transcription.
+            The audio is a WAV file containing speech that needs to be transcribed accurately.
+            Please maintain natural speech patterns and include proper punctuation.
+            """
+            response = model.generate_content([prompt, audio_file])
+            self.transcription_errors = 0  # Reset error count on success
+            return response.text
+        except Exception as e:
+            logger.error(f"Transcription error: {e}", exc_info=True)
+            self.transcription_errors += 1
+            
+            if retries < self.max_retries and self.transcription_errors < 5:
+                logger.info(f"Retrying transcription, attempt {retries + 1}")
+                time.sleep(1)  # Wait before retrying
+                return self._transcribe_audio_with_retry(audio_path, retries + 1)
+            else:
+                return f"Transcription temporarily unavailable"
+
+    def generate_summary(self) -> str:
+        with self.lock:
+            try:
+                if not self.recordings:
+                    return "No recordings available to summarize"
+
+                merged_path = os.path.join(OUTPUT_DIR, "merged_audio.wav")
+                self._merge_recordings(merged_path)
+                
+                if not model:
+                    return "Summary service unavailable"
+                    
+                audio_file = genai.upload_file(path=merged_path)
+                prompt = """
+                Please provide a comprehensive summary of the audio content.
+                Focus on the main points discussed and key takeaways.
+                Format the summary in clear paragraphs with proper punctuation.
+                """
+                response = model.generate_content([prompt, audio_file])
+                return response.text
+                
+            except Exception as e:
+                logger.error(f"Error generating summary: {e}", exc_info=True)
+                return f"Error generating summary: {str(e)}"
+
+    def _merge_recordings(self, output_path: str):
+        if not self.recordings:
+            raise ValueError("No recordings to merge")
+
+        try:
+            with wave.open(self.recordings[0]["path"], 'rb') as first_wav:
+                params = first_wav.getparams()
+                
+            merged_frames = bytearray()
+            for recording in sorted(self.recordings, key=lambda x: x["timestamp"]):
+                with wave.open(recording["path"], 'rb') as wav_file:
+                    merged_frames.extend(wav_file.readframes(wav_file.getnframes()))
+
+            with wave.open(output_path, 'wb') as output_wav:
+                output_wav.setparams(params)
+                output_wav.writeframes(merged_frames)
+        except Exception as e:
+            logger.error(f"Error merging recordings: {e}", exc_info=True)
+            raise
 
 # Create audio processor instance
 audio_processor = AudioProcessor()
 
-
-@app.route('/voice/<path:filename>')
-def serve_voice_files(filename):
-    return send_from_directory('voice', filename)
-
-
-
 @socketio.on('connect')
 def handle_connect():
-    """Handle client connection"""
     logger.info('Client connected')
-    if not audio_processor.is_running:
-        audio_processor.start_processing()
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    """Handle client disconnection"""
     logger.info('Client disconnected')
-    audio_processor.stop_processing()
 
 @socketio.on('audio_data')
 def handle_audio_data(data):
-    """Handle incoming audio data"""
     try:
-        audio_array = np.frombuffer(data['buffer'], dtype=np.float32)
+        # Convert base64 string to numpy array if needed
+        if isinstance(data['buffer'], str):
+            buffer_data = base64.b64decode(data['buffer'])
+            audio_array = np.frombuffer(buffer_data, dtype=np.float32)
+        else:
+            audio_array = np.frombuffer(data['buffer'], dtype=np.float32)
+            
         timestamp = data.get('timestamp', int(time.time() * 1000))
-        mode = data.get('mode', 'both')
+        mode = data.get('mode', 'recording')
         
         if len(audio_array) > 0:
             logger.debug(f"Received audio chunk - Length: {len(audio_array)}, Mode: {mode}")
@@ -271,8 +224,31 @@ def handle_audio_data(data):
     except Exception as e:
         logger.error(f"Error handling audio data: {e}", exc_info=True)
 
+@socketio.on('generate_summary')
+def handle_generate_summary():
+    try:
+        summary = audio_processor.generate_summary()
+        socketio.emit('summary_result', {'text': summary})
+    except Exception as e:
+        logger.error(f"Error generating summary: {e}")
+        socketio.emit('summary_result', {'error': str(e)})
+
+@app.route('/voice/<path:filename>')
+def serve_voice_files(filename):
+    return send_from_directory('voice', filename)
+
 if __name__ == '__main__':
     try:
-        socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False,allow_unsafe_werkzeug=True)
+        socketio.run(
+            app,
+            host='0.0.0.0',
+            port=5000,
+            debug=True,
+            allow_unsafe_werkzeug=True
+        )
+    except KeyboardInterrupt:
+        logger.info("Server shutting down...")
+    except Exception as e:
+        logger.error(f"Error starting server: {e}")
     finally:
-        audio_processor.stop_processing()
+        logger.info("Cleanup complete")

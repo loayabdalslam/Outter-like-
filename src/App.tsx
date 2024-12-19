@@ -1,36 +1,49 @@
-import React from 'react';
-import { Sidebar } from './components/Sidebar';
-import { TranscriptionView } from './components/TranscriptionView';
-import { AIChatSidebar } from './components/Sidebar/AIChatSidebar';
-import { useAudioCapture } from './hooks/useAudioCapture';
-import { TranscriptionHeader } from './TranscriptionHeader';
+import { useState } from 'react'
+import { MonitorStop, StopCircle } from 'lucide-react'
+import ScreenRecorder from './components/ScreenRecorder'
+import TranscriptionDisplay from './components/TranscriptionDisplay'
 
 function App() {
-  const { 
-    isRecording, 
-    messages, 
-    startRecording, 
-    stopRecording 
-  } = useAudioCapture();
+  const [isRecording, setIsRecording] = useState(false)
+
+  const startRecording = () => {
+    setIsRecording(true)
+  }
+
+  const stopRecording = () => {
+    setIsRecording(false)
+  }
 
   return (
-    <div className="flex h-screen bg-gray-50">
-      {/* Left Sidebar */}
-      <Sidebar />
+    <div className="min-h-screen bg-gray-100 p-8">
+      <div className="max-w-4xl mx-auto">
+        <h1 className="text-3xl font-bold mb-8">Screen & Voice Recorder</h1>
+        
+        <div className="flex gap-4 mb-8">
+          {!isRecording ? (
+            <button
+              onClick={startRecording}
+              className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+            >
+              <MonitorStop size={20} />
+              Record Screen with Mic
+            </button>
+          ) : (
+            <button
+              onClick={stopRecording}
+              className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+            >
+              <StopCircle size={20} />
+              Stop Recording
+            </button>
+          )}
+        </div>
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-auto px-8 py-6 ml-[240px] mr-[320px]">
-        <TranscriptionView 
-          isRecording={isRecording}
-          messages={messages}
-          onToggleRecording={isRecording ? stopRecording : startRecording}
-        />
-      </main>
-
-      {/* Right Sidebar */}
-      <AIChatSidebar />
+        <ScreenRecorder isRecording={isRecording} onStop={stopRecording} />
+        <TranscriptionDisplay />
+      </div>
     </div>
-  );
+  )
 }
 
-export default App;
+export default App 
