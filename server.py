@@ -27,17 +27,9 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
-
-# Configure Google Gemini with retry mechanism
-def init_gemini():
-    try:
-        genai.configure(api_key='AIzaSyAHpVJiE-Q6D-GYUO4KTxGh8ok1i58GZHQ')
-        return genai.GenerativeModel('gemini-1.5-flash')
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini: {e}")
-        return None
-
-model = init_gemini()
+# Configure Gemini
+genai.configure(api_key='AIzaSyD3DIAlu69Amj0o6UKm3fhORJ3HGOdAEik', transport='rest')
+model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 app = Flask(__name__)
 CORS(app)
@@ -133,7 +125,7 @@ class AudioProcessor:
             prompt = """
             Please transcribe this audio file and provide a clear, well-formatted transcription.
             The audio is a WAV file containing speech that needs to be transcribed accurately.
-            Please maintain natural speech patterns and include proper punctuation.
+            Please maintain natural speech patterns and include proper punctuation. result should be in arabic
             """
             response = model.generate_content([prompt, audio_file])
             self.transcription_errors = 0  # Reset error count on success
@@ -165,7 +157,7 @@ class AudioProcessor:
                 prompt = """
                 Please provide a comprehensive summary of the audio content.
                 Focus on the main points discussed and key takeaways.
-                Format the summary in clear paragraphs with proper punctuation.
+                Format the summary in clear paragraphs with proper punctuation. result should be in arabic.
                 """
                 response = model.generate_content([prompt, audio_file])
                 return response.text
