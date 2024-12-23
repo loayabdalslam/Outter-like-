@@ -54,6 +54,7 @@ thread_pool = ThreadPoolExecutor(max_workers=3)
 
 class AudioProcessor:
     def __init__(self,lang='ar'):
+        self.lang = lang
         self.lock = threading.Lock()
         self.transcription_errors = 0
         self.max_retries = 3
@@ -91,11 +92,14 @@ class AudioProcessor:
             transcription_filepath = os.path.join(TRANSCRIPTION_DIR, f"{unique_id}_transcription.json")
             self._save_transcription(transcription, transcription_filepath)
 
-
+            summary_result = audio_processor.summarize_text(transcription, timestamp_str)
+            if not summary_result['success']:
+                return jsonify(summary_result), 500
 
             return {
                 'success': True,
                 'transcription': transcription,
+                'summary': summary_result,
                 'filepath': new_filepath,
                 'transcription_filepath': transcription_filepath,
                 'timestamp': timestamp
@@ -137,17 +141,17 @@ class AudioProcessor:
                 return f"Transcription temporarily unavailable"
 
     def summarize_text(self, text: str, timestamp_str: str) -> dict:
+        if self.lang == 'ar':
+            language = 'arabic'
+        else:
+            language = 'english'
+
         try:
             if not model:
                 return {
                     'success': False,
                     'error': "Summarization service unavailable"
                 }
-
-            if self.lang == 'ar':
-                language = 'arabic'
-            else:
-                language = 'english'
 
             summarization_prompt = f""" This is a business meeting 
                     you role is an experienced minute taker
@@ -242,19 +246,19 @@ def upload_audio():
 def get_summary():
     try:
         current_directory = os.getcwd()
-        
+
         folder_path = os.path.join(current_directory, TRANSCRIPTION_DIR)
         folder_contents = sorted(os.listdir(folder_path), reverse=True)  # Get latest file
-        
+
         if not folder_contents:
             return jsonify({
                 'success': False,
                 'error': 'No transcriptions found'
             }), 404
-            
+
         filename = folder_contents[0]
         timestamp_str = filename.split('_')[0]
-        
+
         # Load transcription
         transcription_filepath = os.path.join(TRANSCRIPTION_DIR, filename)
         with open(transcription_filepath, 'r', encoding='utf-8') as f:
@@ -263,12 +267,12 @@ def get_summary():
 
         # Generate summary
         summary_result = audio_processor.summarize_text(transcription, timestamp_str)
-        
+
         if not summary_result['success']:
             return jsonify(summary_result), 500
-            
+
         return jsonify(summary_result)
-        
+
     except Exception as e:
         logger.error(f"Error generating summary: {e}", exc_info=True)
         return jsonify({
