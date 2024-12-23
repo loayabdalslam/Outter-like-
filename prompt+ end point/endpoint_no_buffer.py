@@ -18,6 +18,7 @@ import json
 import werkzeug
 import uuid
 import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
 
 
 sentry_sdk.init(
@@ -30,7 +31,9 @@ sentry_sdk.init(
         # to automatically start the profiler on when
         # possible.
         "continuous_profiling_auto_start": True,
-    },
+    }, environment="production",
+    integrations=[FlaskIntegration()]
+
 )
 
 
