@@ -17,6 +17,21 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import werkzeug
 import uuid
+import sentry_sdk
+
+
+sentry_sdk.init(
+    dsn="https://cb8037c1a5f827203638c77a613105b0@o4508518491226112.ingest.de.sentry.io/4508518580486224",
+    # Set traces_sample_rate to 1.0 to capture 100%
+    # of transactions for tracing.
+    traces_sample_rate=1.0,
+    _experiments={
+        # Set continuous_profiling_auto_start to True
+        # to automatically start the profiler on when
+        # possible.
+        "continuous_profiling_auto_start": True,
+    },
+)
 
 
 # Configure logging first
@@ -92,7 +107,7 @@ class AudioProcessor:
             transcription_filepath = os.path.join(TRANSCRIPTION_DIR, f"{unique_id}_transcription.json")
             self._save_transcription(transcription, transcription_filepath)
 
-            summary_result = audio_processor.summarize_text(transcription, timestamp_str)
+            summary_result = self.summarize_text(transcription, timestamp_str)
             if not summary_result['success']:
                 return jsonify(summary_result), 500
 
@@ -241,44 +256,10 @@ def upload_audio():
             'success': False,
             'error': str(e)
         }), 500
-
-@app.route('/summarize', methods=['GET'])
-def get_summary():
-    try:
-        current_directory = os.getcwd()
-
-        folder_path = os.path.join(current_directory, TRANSCRIPTION_DIR)
-        folder_contents = sorted(os.listdir(folder_path), reverse=True)  # Get latest file
-
-        if not folder_contents:
-            return jsonify({
-                'success': False,
-                'error': 'No transcriptions found'
-            }), 404
-
-        filename = folder_contents[0]
-        timestamp_str = filename.split('_')[0]
-
-        # Load transcription
-        transcription_filepath = os.path.join(TRANSCRIPTION_DIR, filename)
-        with open(transcription_filepath, 'r', encoding='utf-8') as f:
-            transcription_data = json.load(f)
-            transcription = transcription_data['transcription']
-
-        # Generate summary
-        summary_result = audio_processor.summarize_text(transcription, timestamp_str)
-
-        if not summary_result['success']:
-            return jsonify(summary_result), 500
-
-        return jsonify(summary_result)
-
-    except Exception as e:
-        logger.error(f"Error generating summary: {e}", exc_info=True)
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+@app.route("/")
+def hello_world(): #test sentry
+    1/0  # raises an error
+    return "<p>Hello, World!</p>"
 
 # Serve files from voice directory
 app.add_url_rule('/voice/<path:filename>', endpoint='voice_files', 
