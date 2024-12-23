@@ -16,6 +16,8 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 import json
 import werkzeug
+import uuid
+
 
 # Configure logging first
 logging.basicConfig(
@@ -51,33 +53,46 @@ request_queue = Queue(maxsize=REQUEST_QUEUE_SIZE)
 thread_pool = ThreadPoolExecutor(max_workers=3)
 
 class AudioProcessor:
-    def __init__(self):
+    def __init__(self,lang='ar'):
         self.lock = threading.Lock()
         self.transcription_errors = 0
         self.max_retries = 3
-        self.transcription_prompt = """
-            Please transcribe this audio file and provide a clear, well-formatted transcription.
-            The audio is a WAV file containing speech that needs to be transcribed accurately.
-            pUT IN YOUR CONCERNS TO DEFINE THE SPEAKER, I DON'T MEAN DIARIZATION,but i need an inform that a different speaker is here, transcribe the meeting until different one speak and then split it , and start the transcribtion of the next and so on ALSO FORMAT THE TRANSCRIBE AS A dialogue with timestamps
-            Please maintain natural speech patterns and include proper punctuation. result should be in arabic
-            """
+
+        if lang == 'ar':
+            language = 'arabic'
+        else:
+            language = 'english'
+
+        self.transcription_prompt = f"""
+                        Please transcribe this audio file and provide a clear, well-formatted transcription.
+                        The audio is a WAV file containing speech that needs to be transcribed accurately.
+                        pUT IN YOUR CONCERNS TO DEFINE THE SPEAKER, I DON'T MEAN DIARIZATION,but i need an inform that a different speaker is here, 
+                        transcribe the meeting until different one speak and then split it , and start the transcribtion of the next and so on 
+                        ALSO FORMAT THE TRANSCRIBE AS A dialogue with timestamps
+                        Please maintain natural speech patterns and include proper punctuation. result should be in {language}
+                        """
+
 
     def process_audio_file(self, file_path: str, original_filename: str) -> dict:
         try:
             timestamp = int(time.time() * 1000)
             timestamp_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y%m%d_%H%M%S')
-            
+
+
             # Save file with timestamp
-            new_filepath = os.path.join(VOICE_DIR, f"{timestamp_str}_{original_filename}")
+            unique_id = str(uuid.uuid4())
+            new_filepath = os.path.join(VOICE_DIR, f"{unique_id}_{original_filename}")
             os.rename(file_path, new_filepath)
             
             # Get transcription
             transcription = self._transcribe_audio_with_retry(new_filepath)
             
             # Save transcription
-            transcription_filepath = os.path.join(TRANSCRIPTION_DIR, f"{timestamp_str}_transcription.json")
+            transcription_filepath = os.path.join(TRANSCRIPTION_DIR, f"{unique_id}_transcription.json")
             self._save_transcription(transcription, transcription_filepath)
-            
+
+
+
             return {
                 'success': True,
                 'transcription': transcription,
@@ -85,6 +100,7 @@ class AudioProcessor:
                 'transcription_filepath': transcription_filepath,
                 'timestamp': timestamp
             }
+
         except Exception as e:
             logger.error(f"Error processing audio file: {e}", exc_info=True)
             return {
@@ -128,16 +144,22 @@ class AudioProcessor:
                     'error': "Summarization service unavailable"
                 }
 
-            summarization_prompt = """ This is a business meeting 
+            if self.lang == 'ar':
+                language = 'arabic'
+            else:
+                language = 'english'
+
+            summarization_prompt = f""" This is a business meeting 
                     you role is an experienced minute taker
                     
                     THE INPUT: you will be given a meeting and you should do your job as the most experienced minute taker do
     
-                    The Expected output is : all important information, dates, decisions , tasks and deadlines mentioned in the meeting. ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
+                    The Expected output is : all important information, dates, decisions , tasks and deadlines mentioned in the meeting. 
+                    ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
     
                     Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you above
                     Focus on the main points discussed and key takeaways.
-                    Format the summary in clear paragraphs with proper punctuation. result should be in arabic.
+                    Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
                     """
 
             response = model.generate_content([summarization_prompt, text])
