@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 # Configure Gemini
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'), transport='rest')
+genai.configure(api_key=os.getenv('AIzaSyD3DIAlu69Amj0o6UKm3fhORJ3HGOdAEik'), transport='rest')
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 app = Flask(__name__)
