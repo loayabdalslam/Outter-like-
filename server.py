@@ -21,8 +21,10 @@ from torch.distributed.pipelining.microbatch import merge_chunks
 # Load environment variables
 load_dotenv()
 
+GEMINI_API = "AIzaSyA-Ayj7gvkSjdFdwlFBgUcRWTz9lPYEb5U"
+GEMINI_API = "AIzaSyBJsIimozKkHY5pmTaQ7E5eJDCV8zoiQ50"
 # Configure Google Gemini
-genai.configure(api_key="AIzaSyA-Ayj7gvkSjdFdwlFBgUcRWTz9lPYEb5U")
+genai.configure(api_key=GEMINI_API)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
 app = Flask(__name__)
