@@ -17,14 +17,31 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import werkzeug
 import uuid
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
 
 
-# Configure logging first
+sentry_sdk.init(
+    dsn="https://cb8037c1a5f827203638c77a613105b0@o4508518491226112.ingest.de.sentry.io/4508518580486224",
+    # Set traces_sample_rate to 1.0 to capture 100%
+    # of transactions for tracing.
+    traces_sample_rate=1.0,
+    _experiments={
+        # Set continuous_profiling_auto_start to True
+        # to automatically start the profiler on when
+        # possible.
+        "continuous_profiling_auto_start": True,
+    }, environment="production",
+    integrations=[FlaskIntegration()]
+
+)
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        RotatingFileHandler('app.log', maxBytes=1024*1024, backupCount=5),
+        RotatingFileHandler('app.log', maxBytes=1024 * 1024, backupCount=5),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -33,10 +50,14 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 # Configure Gemini
+<<<<<<< HEAD
 gemini_api = 'AIzaSyD3DIAlu69Amj0o6UKm3fhORJ3HGOdAEik' ## old one
 gemini_api = "AIzaSyBtKc1jpXEYaluadjU44A7e6ejAzY_la_E"
 gemini_api = "AIzaSyBJsIimozKkHY5pmTaQ7E5eJDCV8zoiQ50"
 genai.configure(api_key=gemini_api, transport='rest')
+=======
+genai.configure(api_key=os.getenv('AIzaSyD3DIAlu69Amj0o6UKm3fhORJ3HGOdAEik'), transport='rest')
+>>>>>>> 8be66732acb7f40712042cc2a9fbad4b76dcdee5
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 app = Flask(__name__)
@@ -55,8 +76,9 @@ REQUEST_QUEUE_SIZE = 10
 request_queue = Queue(maxsize=REQUEST_QUEUE_SIZE)
 thread_pool = ThreadPoolExecutor(max_workers=3)
 
+
 class AudioProcessor:
-    def __init__(self,lang='ar'):
+    def __init__(self, lang='ar'):
         self.lang = lang
         self.lock = threading.Lock()
         self.transcription_errors = 0
@@ -67,6 +89,7 @@ class AudioProcessor:
         else:
             language = 'english'
 
+<<<<<<< HEAD
         self.transcription_prompt = f"""This is a business meeting 
                     you role is an experienced minute taker
                     
@@ -80,26 +103,35 @@ class AudioProcessor:
                     Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
                         """
 
+=======
+        self.transcription_prompt = f"""
+            Please transcribe this audio file and provide a clear, well-formatted transcription.
+            The audio is a WAV file containing speech that needs to be transcribed accurately.
+            pUT IN YOUR CONCERNS TO DEFINE THE SPEAKER, I DON'T MEAN DIARIZATION,but i need an inform that a different speaker is here, 
+            transcribe the meeting until different one speak and then split it , and start the transcribtion of the next and so on 
+            ALSO FORMAT THE TRANSCRIBE AS A dialogue with timestamps
+            Please maintain natural speech patterns and include proper punctuation. result should be in {language}
+        """
+>>>>>>> 8be66732acb7f40712042cc2a9fbad4b76dcdee5
 
     def process_audio_file(self, file_path: str, original_filename: str) -> dict:
         try:
             timestamp = int(time.time() * 1000)
             timestamp_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y%m%d_%H%M%S')
 
-
             # Save file with timestamp
             unique_id = str(uuid.uuid4())
             new_filepath = os.path.join(VOICE_DIR, f"{unique_id}_{original_filename}")
             os.rename(file_path, new_filepath)
-            
+
             # Get transcription
             transcription = self._transcribe_audio_with_retry(new_filepath)
-            
+
             # Save transcription
             transcription_filepath = os.path.join(TRANSCRIPTION_DIR, f"{unique_id}_transcription.json")
             self._save_transcription(transcription, transcription_filepath)
 
-            summary_result = audio_processor.summarize_text(transcription, timestamp_str)
+            summary_result = self.summarize_text(transcription, timestamp_str)
             if not summary_result['success']:
                 return jsonify(summary_result), 500
 
@@ -114,6 +146,7 @@ class AudioProcessor:
 
         except Exception as e:
             logger.error(f"Error processing audio file: {e}", exc_info=True)
+            sentry_sdk.capture_exception(e)
             return {
                 'success': False,
                 'error': str(e)
@@ -125,27 +158,29 @@ class AudioProcessor:
                 json.dump({'Summary notes': transcription, 'timestamp': time.time()}, f, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Error saving transcription file: {e}", exc_info=True)
+            sentry_sdk.capture_exception(e)
             raise
 
     def _transcribe_audio_with_retry(self, audio_path: str, retries=0) -> str:
         try:
             if not model:
                 return "Transcription service unavailable"
-                
+
             audio_file = genai.upload_file(path=audio_path)
             response = model.generate_content([self.transcription_prompt, audio_file])
             self.transcription_errors = 0  # Reset error count on success
             return response.text
         except Exception as e:
             logger.error(f"Transcription error: {e}", exc_info=True)
+            sentry_sdk.capture_exception(e)
             self.transcription_errors += 1
-            
+
             if retries < self.max_retries and self.transcription_errors < 5:
                 logger.info(f"Retrying transcription, attempt {retries + 1}")
                 time.sleep(1)  # Wait before retrying
                 return self._transcribe_audio_with_retry(audio_path, retries + 1)
             else:
-                return f"Transcription temporarily unavailable"
+                return "Transcription temporarily unavailable"
 
     def summarize_text(self, text: str, timestamp_str: str) -> dict:
         if self.lang == 'ar':
@@ -161,17 +196,17 @@ class AudioProcessor:
                 }
 
             summarization_prompt = f""" This is a business meeting 
-                    you role is an experienced minute taker
-                    
-                    THE INPUT: you will be given a meeting and you should do your job as the most experienced minute taker do
-    
-                    The Expected output is : all important information, dates, decisions , tasks and deadlines mentioned in the meeting. 
-                    ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
-    
-                    Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you above
-                    Focus on the main points discussed and key takeaways.
-                    Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
-                    """
+                you role is an experienced minute taker
+
+                THE INPUT: you will be given a meeting and you should do your job as the most experienced minute taker do
+
+                The Expected output is : all important information, dates, decisions , tasks and deadlines mentioned in the meeting. 
+                ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
+
+                Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you above
+                Focus on the main points discussed and key takeaways.
+                Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
+            """
 
             response = model.generate_content([summarization_prompt, text])
             summary = response.text
@@ -192,17 +227,21 @@ class AudioProcessor:
             }
         except Exception as e:
             logger.error(f"Summarization error: {e}", exc_info=True)
+            sentry_sdk.capture_exception(e)
             return {
                 'success': False,
                 'error': "Summarization failed"
             }
 
+
 # Create audio processor instance
 audio_processor = AudioProcessor()
+
 
 def process_queued_request(file_path: str, original_filename: str):
     result = audio_processor.process_audio_file(file_path, original_filename)
     return result
+
 
 @app.route('/upload', methods=['POST'])
 def upload_audio():
@@ -235,60 +274,24 @@ def upload_audio():
         # Save uploaded file temporarily
         temp_filepath = os.path.join(VOICE_DIR, werkzeug.utils.secure_filename(file.filename))
         file.save(temp_filepath)
-        
+
         # Process file through queue
         future = thread_pool.submit(process_queued_request, temp_filepath, file.filename)
         result = future.result()
-        
+
         return jsonify(result)
 
     except Exception as e:
         logger.error(f"Error handling file upload: {e}", exc_info=True)
+        sentry_sdk.capture_exception(e)
         return jsonify({
             'success': False,
             'error': str(e)
         }), 500
 
-@app.route('/summarize', methods=['GET'])
-def get_summary():
-    try:
-        current_directory = os.getcwd()
-
-        folder_path = os.path.join(current_directory, TRANSCRIPTION_DIR)
-        folder_contents = sorted(os.listdir(folder_path), reverse=True)  # Get latest file
-
-        if not folder_contents:
-            return jsonify({
-                'success': False,
-                'error': 'No transcriptions found'
-            }), 404
-
-        filename = folder_contents[0]
-        timestamp_str = filename.split('_')[0]
-
-        # Load transcription
-        transcription_filepath = os.path.join(TRANSCRIPTION_DIR, filename)
-        with open(transcription_filepath, 'r', encoding='utf-8') as f:
-            transcription_data = json.load(f)
-            transcription = transcription_data['transcription']
-
-        # Generate summary
-        summary_result = audio_processor.summarize_text(transcription, timestamp_str)
-
-        if not summary_result['success']:
-            return jsonify(summary_result), 500
-
-        return jsonify(summary_result)
-
-    except Exception as e:
-        logger.error(f"Error generating summary: {e}", exc_info=True)
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
 
 # Serve files from voice directory
-app.add_url_rule('/voice/<path:filename>', endpoint='voice_files', 
+app.add_url_rule('/voice/<path:filename>', endpoint='voice_files',
                  view_func=lambda filename: send_from_directory('voice', filename))
 
 if __name__ == '__main__':
@@ -299,5 +302,6 @@ if __name__ == '__main__':
         thread_pool.shutdown(wait=True)
     except Exception as e:
         logger.error(f"Error starting server: {e}")
+        sentry_sdk.capture_exception(e)
     finally:
         logger.info("Cleanup complete")
