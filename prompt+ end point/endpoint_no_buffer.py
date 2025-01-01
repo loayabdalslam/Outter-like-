@@ -85,14 +85,20 @@ class AudioProcessor:
         else:
             language = 'english'
 
-        self.transcription_prompt = f"""
-            Please transcribe this audio file and provide a clear, well-formatted transcription.
-            The audio is a WAV file containing speech that needs to be transcribed accurately.
-            pUT IN YOUR CONCERNS TO DEFINE THE SPEAKER, I DON'T MEAN DIARIZATION,but i need an inform that a different speaker is here, 
-            transcribe the meeting until different one speak and then split it , and start the transcribtion of the next and so on 
-            ALSO FORMAT THE TRANSCRIBE AS A dialogue with timestamps
-            Please maintain natural speech patterns and include proper punctuation. result should be in {language}
-        """
+        self.transcription_prompt = f"""This is a business meeting
+          you role is an experienced minute taker
+
+          THE INPUT: you will be given a meeting and you should do your job as the most experienced minute taker do
+
+          The Expected output is : all important information, dates, decisions , tasks and deadlines mentioned in the meeting.
+          ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
+
+          Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you 
+          above.    Focus on the main points discussed and key takeaways, and in addition to that add another Section that has
+          the very important details of the meeting and their corresponding explanations in a seperated list to make sure we cover 
+          everything but make sure that this section is the last section and it doesn't change the structure we agreed on
+          for important information mentioned above. Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
+                                    """
 
     def process_audio_file(self, file_path: str, original_filename: str) -> dict:
         try:
@@ -111,9 +117,9 @@ class AudioProcessor:
             transcription_filepath = os.path.join(TRANSCRIPTION_DIR, f"{unique_id}_transcription.json")
             self._save_transcription(transcription, transcription_filepath)
 
-            summary_result = self.summarize_text(transcription, timestamp_str)
-            if not summary_result['success']:
-                return jsonify(summary_result), 500
+            #summary_result = self.summarize_text(transcription, timestamp_str)
+            #if not summary_result['success']:
+            #    return jsonify(summary_result), 500
 
             return {
                 'success': True,
