@@ -94,7 +94,7 @@ class AudioProcessor:
           ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
 
           Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you 
-          above.    Focus on the main points discussed and key takeaways, and in addition to that add another Section that has
+          above.   Focus on the main points discussed and key takeaways, and in addition to that add another Section that has
           the very important details of the meeting and their corresponding explanations in a seperated list to make sure we cover 
           everything but make sure that this section is the last section and it doesn't change the structure we agreed on
           for important information mentioned above. Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
@@ -258,7 +258,8 @@ def upload_audio():
         file.save(temp_filepath)
         if not file.filename.endswith('.wav'):
             input_video=temp_filepath
-            output_audio = r"D:\BEETLEWARE\test_videos\test_converter\output.wav"
+            file_type = str(temp_filepath).split('.')[-1]
+            output_audio = temp_filepath.replace(file_type, 'wav')
             extract_audio(input_path=input_video,
                           output_path=output_audio,
                           output_format='wav')
