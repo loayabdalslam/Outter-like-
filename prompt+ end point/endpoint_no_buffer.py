@@ -19,6 +19,7 @@ import werkzeug
 import uuid
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
+from audio_extract import extract_audio
 
 
 sentry_sdk.init(
@@ -50,9 +51,8 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 # Configure Gemini
-gemini_api = 'AIzaSyD3DIAlu69Amj0o6UKm3fhORJ3HGOdAEik' ## old one
-gemini_api = "AIzaSyBtKc1jpXEYaluadjU44A7e6ejAzY_la_E"
-gemini_api = "AIzaSyBJsIimozKkHY5pmTaQ7E5eJDCV8zoiQ50"
+
+gemini_api = "AIzaSyDuRZPOikRxilF7k5zoMRoHGzNyfP6EKMc"
 genai.configure(api_key=gemini_api, transport='rest')
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
@@ -251,16 +251,18 @@ def upload_audio():
                 'error': 'No file selected'
             }), 400
 
-        if not file.filename.endswith('.wav'):
-            return jsonify({
-                'success': False,
-                'error': 'Only WAV files are supported'
-            }), 400
+
 
         # Save uploaded file temporarily
         temp_filepath = os.path.join(VOICE_DIR, werkzeug.utils.secure_filename(file.filename))
         file.save(temp_filepath)
-
+        if not file.filename.endswith('.wav'):
+            input_video=temp_filepath
+            output_audio = r"D:\BEETLEWARE\test_videos\test_converter\output.wav"
+            extract_audio(input_path=input_video,
+                          output_path=output_audio,
+                          output_format='wav')
+            temp_filepath = output_audio
         # Process file through queue
         future = thread_pool.submit(process_queued_request, temp_filepath, file.filename)
         result = future.result()
