@@ -1,14 +1,11 @@
 from flask import Flask, request, send_from_directory, jsonify
 from flask_cors import CORS
-import numpy as np
-import wave
 import threading
 import time
 import os
 from datetime import datetime
 import google.generativeai as genai
 from dotenv import load_dotenv
-import base64
 import sys
 import logging
 from logging.handlers import RotatingFileHandler
@@ -51,6 +48,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 # Configure Gemini
+global unique_id
 
 gemini_api = "AIzaSyDuRZPOikRxilF7k5zoMRoHGzNyfP6EKMc"
 genai.configure(api_key=gemini_api, transport='rest')
@@ -104,10 +102,12 @@ class AudioProcessor:
         try:
             timestamp = int(time.time() * 1000)
             timestamp_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y%m%d_%H%M%S')
-
+            print(f"file path to check : {file_path}")
             # Save file with timestamp
             unique_id = str(uuid.uuid4())
-            new_filepath = os.path.join(VOICE_DIR, f"{unique_id}_{original_filename}")
+            new_filepath = str(VOICE_DIR) + '\\' + str(f"{unique_id}_{original_filename}")
+            file_type = new_filepath.split('.')[-1]
+            new_filepath = new_filepath.replace(file_type,'wav')
             os.rename(file_path, new_filepath)
 
             # Get transcription
@@ -117,9 +117,6 @@ class AudioProcessor:
             transcription_filepath = os.path.join(TRANSCRIPTION_DIR, f"{unique_id}_transcription.json")
             self._save_transcription(transcription, transcription_filepath)
 
-            #summary_result = self.summarize_text(transcription, timestamp_str)
-            #if not summary_result['success']:
-            #    return jsonify(summary_result), 500
 
             return {
                 'success': True,
@@ -131,6 +128,8 @@ class AudioProcessor:
             }
 
         except Exception as e:
+            new_filepath = os.path.join(VOICE_DIR, f"{unique_id}_{original_filename}")
+            print(f"filepath : {new_filepath}")
             logger.error(f"Error processing audio file: {e}", exc_info=True)
             sentry_sdk.capture_exception(e)
             return {
@@ -152,6 +151,7 @@ class AudioProcessor:
             if not model:
                 return "Transcription service unavailable"
 
+            print(f'audio path for upload: {audio_path}')
             audio_file = genai.upload_file(path=audio_path)
             response = model.generate_content([self.transcription_prompt, audio_file])
             self.transcription_errors = 0  # Reset error count on success
@@ -168,61 +168,9 @@ class AudioProcessor:
             else:
                 return "Transcription temporarily unavailable"
 
-    def summarize_text(self, text: str, timestamp_str: str) -> dict:
-        if self.lang == 'ar':
-            language = 'arabic'
-        else:
-            language = 'english'
-
-        try:
-            if not model:
-                return {
-                    'success': False,
-                    'error': "Summarization service unavailable"
-                }
-
-            summarization_prompt = f""" This is a business meeting 
-                you role is an experienced minute taker
-
-                THE INPUT: you will be given a meeting and you should do your job as the most experienced minute taker do
-
-                The Expected output is : all important information, dates, decisions , tasks and deadlines mentioned in the meeting. 
-                ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
-
-                Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you above
-                Focus on the main points discussed and key takeaways.
-                Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
-            """
-
-            response = model.generate_content([summarization_prompt, text])
-            summary = response.text
-
-            # Save summary to file
-            summary_filepath = os.path.join(SUMMARY_DIR, f"{timestamp_str}_summary.json")
-            with open(summary_filepath, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'summary': summary,
-                    'timestamp': time.time(),
-                    'original_timestamp': timestamp_str
-                }, f, ensure_ascii=False)
-
-            return {
-                'success': True,
-                'summary': summary,
-                'summary_filepath': summary_filepath
-            }
-        except Exception as e:
-            logger.error(f"Summarization error: {e}", exc_info=True)
-            sentry_sdk.capture_exception(e)
-            return {
-                'success': False,
-                'error': "Summarization failed"
-            }
-
 
 # Create audio processor instance
 audio_processor = AudioProcessor()
-
 
 def process_queued_request(file_path: str, original_filename: str):
     result = audio_processor.process_audio_file(file_path, original_filename)
@@ -251,15 +199,21 @@ def upload_audio():
                 'error': 'No file selected'
             }), 400
 
-
-
         # Save uploaded file temporarily
-        temp_filepath = os.path.join(VOICE_DIR, werkzeug.utils.secure_filename(file.filename))
+        temp_filepath = str(VOICE_DIR) + '\\' + str(werkzeug.utils.secure_filename(file.filename))
+        print(f'file path : {temp_filepath}')
+        if '.' not in str(temp_filepath): ## it means a bad name like mp3 or mp
+            temp_filepath2 = str(f'voice\\{str(file.filename)}.') + temp_filepath[-3:]
+            temp_filepath = temp_filepath2
+
         file.save(temp_filepath)
         if not file.filename.endswith('.wav'):
-            input_video=temp_filepath
-            file_type = str(temp_filepath).split('.')[-1]
-            output_audio = temp_filepath.replace(file_type, 'wav')
+            input_video = temp_filepath
+            file_type   = str(temp_filepath).split('.')[-1]
+            output_audio = str(temp_filepath).replace(file_type, 'wav')
+            if str(output_audio).strip() == 'wav':
+                str1 = '.' + file_type
+                output_audio = temp_filepath.replace(str1, '.wav')
             extract_audio(input_path=input_video,
                           output_path=output_audio,
                           output_format='wav')
@@ -277,7 +231,6 @@ def upload_audio():
             'success': False,
             'error': str(e)
         }), 500
-
 
 # Serve files from voice directory
 app.add_url_rule('/voice/<path:filename>', endpoint='voice_files',
