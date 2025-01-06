@@ -1,0 +1,185 @@
+import json
+
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+import os
+import uuid
+import logging
+from logging.handlers import RotatingFileHandler
+import google.generativeai as genai
+from dotenv import load_dotenv
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
+from audio_extract import extract_audio
+import werkzeug
+import threading
+
+# Initialize Sentry for error tracking
+sentry_sdk.init(
+    dsn="https://cb8037c1a5f827203638c77a613105b0@o4508518491226112.ingest.de.sentry.io/4508518580486224",
+    traces_sample_rate=1.0,
+    _experiments={"continuous_profiling_auto_start": True},
+    environment="production",
+    integrations=[FlaskIntegration()]
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        RotatingFileHandler('app.log', maxBytes=1024 * 1024, backupCount=5),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+# Configure Gemini
+gemini_api = "AIzaSyDuRZPOikRxilF7k5zoMRoHGzNyfP6EKMc"
+genai.configure(api_key=gemini_api, transport='rest')
+model = genai.GenerativeModel('gemini-2.0-flash-exp')
+
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)
+
+# Configure directories
+UPLOAD_DIR = "uploads"
+WAV_DIR = "wav_files"
+TRANSCRIPTION_DIR = "transcriptions"
+for dir in [UPLOAD_DIR, WAV_DIR, TRANSCRIPTION_DIR]:
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+
+class AudioProcessor:
+    def __init__(self, lang='ar'):
+        self.lang = lang
+        self.transcription_prompt = """This is a business meeting
+          you role is an experienced minute taker
+
+          THE INPUT: you will be given a meeting and you should do your job as the most experienced minute taker do
+
+          The Expected output is : all important information, dates, decisions , tasks and deadlines mentioned in the meeting.
+          ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
+
+          Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you 
+          above.   Focus on the main points discussed and key takeaways, and in addition to that add another Section that has
+          the very important details of the meeting and their corresponding explanations in a seperated list to make sure we cover 
+          everything but make sure that this section is the last section and it doesn't change the structure we agreed on
+          for important information mentioned above. Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
+                                    """
+
+    def transcribe_audio(self, audio_path: str) -> str:
+        try:
+            audio_file = genai.upload_file(path=audio_path)
+            response = model.generate_content([self.transcription_prompt, audio_file])
+            return response.text
+        except Exception as e:
+            logger.error(f"Transcription error: {e}", exc_info=True)
+            sentry_sdk.capture_exception(e)
+            return "Transcription failed"
+
+# Create audio processor instance
+audio_processor = AudioProcessor()
+
+# Endpoint 1: Upload and convert file
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    try:
+        if 'file' not in request.files:
+            return jsonify(success=False, error="No file provided"), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify(success=False, error="No file selected"), 400
+
+        # Generate a unique ID for the file
+        unique_id = str(uuid.uuid4())
+        original_filename = werkzeug.utils.secure_filename(file.filename)
+        upload_path = os.path.join(UPLOAD_DIR, f"{unique_id}_{original_filename}")
+        wav_path = os.path.join(WAV_DIR, f"{unique_id}.wav")
+
+        # Save the uploaded file
+        file.save(upload_path)
+        logger.info(f"File saved temporarily at: {upload_path}")
+
+        # Convert to WAV format
+        if not original_filename.endswith('.wav'):
+            logger.info(f"Converting file to WAV: {upload_path} -> {wav_path}")
+            extract_audio(input_path=upload_path, output_path=wav_path, output_format='wav')
+        else:
+            os.rename(upload_path, wav_path)
+            logger.info(f"File is already in WAV format: {wav_path}")
+
+        # Automatically call the second endpoint in a background thread
+        app_context = app.app_context()
+
+        threading.Thread(target=run_summary_in_thread, args=(app_context, unique_id)).start()
+
+        return jsonify(success=True, file_id=unique_id), 200
+
+    except Exception as e:
+        logger.error(f"Error uploading file: {e}", exc_info=True)
+        sentry_sdk.capture_exception(e)
+        return jsonify(success=False, error=str(e)), 500
+def run_summary_in_thread(app_context, unique_id):
+    with app_context:  # Push the application context to the thread
+        summarize_file(unique_id)
+# Endpoint 2: Summarize the WAV file
+@app.route('/summarize', methods=['POST'])
+def summarize_file(file_id: str = None):
+    try:
+        print("i am here")
+        if not file_id:
+            data = request.json
+            if 'file_id' not in data:
+                return jsonify(success=False, error="No file ID provided"), 400
+            file_id = data['file_id']
+
+        wav_path = os.path.join(WAV_DIR, f"{file_id}.wav")
+
+        if not os.path.exists(wav_path):
+            return jsonify(success=False, error="File not found"), 404
+
+        # Transcribe and summarize the WAV file
+        logger.info(f"Starting transcription for file: {wav_path}")
+        summary = audio_processor.transcribe_audio(wav_path)
+        logger.info(f"Transcription completed for file: {wav_path}")
+
+        # Save transcription
+        transcription_path = os.path.join(TRANSCRIPTION_DIR, f"{file_id}_transcription.json")
+        with open(transcription_path, 'w', encoding='utf-8') as f:
+            json.dump({'summary': summary}, f, ensure_ascii=False)
+        logger.info(f"Transcription saved at: {transcription_path}")
+
+        # Clean up temporary files
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
+            logger.info(f"WAV file removed: {wav_path}")
+        print("i will print")
+        print(f"Summary for file {file_id}: {summary}")
+        return jsonify(success=True, summary=summary), 200
+
+    except Exception as e:
+        logger.error(f"Error summarizing file: {e}", exc_info=True)
+        sentry_sdk.capture_exception(e)
+        return jsonify(success=False, error=str(e)), 500
+
+# Serve files from WAV directory
+@app.route('/wav/<path:filename>')
+def serve_wav(filename):
+    return send_from_directory(WAV_DIR, filename)
+
+if __name__ == '__main__':
+    try:
+        app.run(host='0.0.0.0', port=5000, debug=True)
+    except KeyboardInterrupt:
+        logger.info("Server shutting down...")
+    except Exception as e:
+        logger.error(f"Error starting server: {e}")
+        sentry_sdk.capture_exception(e)
+    finally:
+        logger.info("Cleanup complete")
