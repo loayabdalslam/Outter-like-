@@ -1,35 +1,34 @@
-from flask import Flask, request, send_from_directory, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import threading
-import time
 import os
-from datetime import datetime
-import google.generativeai as genai
-from dotenv import load_dotenv
-import sys
+import uuid
+import json
+import time
 import logging
 from logging.handlers import RotatingFileHandler
-from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
-import json
-import werkzeug
-import uuid
+from queue import Queue
+from audio_extract import extract_audio
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
-from audio_extract import extract_audio
+import google.generativeai as genai
+from datetime import datetime
+global unique_id
 
+gemini_api = "AIzaSyDuRZPOikRxilF7k5zoMRoHGzNyfP6EKMc"
+genai.configure(api_key=gemini_api, transport='rest')
+model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
-sentry_sdk.init(
-    dsn="https://cb8037c1a5f827203638c77a613105b0@o4508518491226112.ingest.de.sentry.io/4508518580486224",
-    # Set traces_sample_rate to 1.0 to capture 100 of transactions for tracing.
-    traces_sample_rate=1.0,
-    _experiments={
-        # Set continuous_profiling_auto_start to True to automatically start the profiler on when possible
-        "continuous_profiling_auto_start": True,
-    }, environment="production",
-    integrations=[FlaskIntegration()]
+# Initialize Flask App
+app = Flask(__name__)
+CORS(app)
 
-)
+# Directories for file handling
+VOICE_DIR = "voice"
+TRANSCRIPTION_DIR = "transcriptions"
+os.makedirs(VOICE_DIR, exist_ok=True)
+os.makedirs(TRANSCRIPTION_DIR, exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
@@ -37,35 +36,25 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         RotatingFileHandler('app.log', maxBytes=1024 * 1024, backupCount=5),
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
-# Configure Gemini
-global unique_id
-
-gemini_api = "AIzaSyDuRZPOikRxilF7k5zoMRoHGzNyfP6EKMc"
-genai.configure(api_key=gemini_api, transport='rest')
-model = genai.GenerativeModel('gemini-2.0-flash-exp')
-
-app = Flask(__name__)
-CORS(app)
-
-# Configure directories
-VOICE_DIR = "voice"
-TRANSCRIPTION_DIR = "transcriptions"
-for dir in [VOICE_DIR, TRANSCRIPTION_DIR]:
-    if not os.path.exists(dir):
-        os.makedirs(dir)
+# Configure Sentry for error tracking
+sentry_sdk.init(
+    dsn="https://example_sentry_dsn@ingest.sentry.io/1234567",
+    traces_sample_rate=1.0,
+    integrations=[FlaskIntegration()]
+)
 
 # Configure request queue and thread pool
 REQUEST_QUEUE_SIZE = 10
 request_queue = Queue(maxsize=REQUEST_QUEUE_SIZE)
 thread_pool = ThreadPoolExecutor(max_workers=3)
 
+# In-memory status store for simplicity (use a database in production)
+task_status = {}
 
 class AudioProcessor:
     def __init__(self, lang='ar'):
@@ -163,82 +152,56 @@ class AudioProcessor:
             else:
                 return "Transcription temporarily unavailable"
 
-
-# Create audio processor instance
-audio_processor = AudioProcessor()
+processor = AudioProcessor()
 
 def process_queued_request(file_path: str, original_filename: str):
-    result = audio_processor.process_audio_file(file_path, original_filename)
+    result = processor.process_audio_file(file_path, original_filename)
     return result
 
+def handle_audio_processing(task_id, file_path, filename):
+    try:
+        summary = processor.process_audio_file(file_path, filename)
+        summary_path = os.path.join(TRANSCRIPTION_DIR, f"{task_id}_summary.json")
+        with open(summary_path, 'w') as f:
+            json.dump({'summary': summary}, f)
+        task_status[task_id] = {'status': 'completed', 'summary': summary}
+    except Exception as e:
+        task_status[task_id] = {'status': 'error', 'error': str(e)}
 
 @app.route('/upload', methods=['POST'])
 def upload_audio():
-    try:
-        if request_queue.full():
-            return jsonify({
-                'success': False,
-                'error': 'Server is busy. Please try again later.'
-            }), 503
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': 'No file provided'}), 400
 
-        if 'file' not in request.files:
-            return jsonify({
-                'success': False,
-                'error': 'No file provided'
-            }), 400
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({'success': False, 'error': 'No file selected'}), 400
 
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({
-                'success': False,
-                'error': 'No file selected'
-            }), 400
+    task_id = unique_id
+    temp_filepath = os.path.join(VOICE_DIR, f"{task_id}_{file.filename}")
+    file.save(temp_filepath)
 
-        # Save uploaded file temporarily
-        temp_filepath = str(VOICE_DIR) + '\\' + str(werkzeug.utils.secure_filename(file.filename))
-        print(f'file path : {temp_filepath}')
-        if '.' not in str(temp_filepath): ## it means a bad name like mp3 or mp
-            temp_filepath2 = str(f'voice\\{str(file.filename)}.') + temp_filepath[-3:]
-            temp_filepath = temp_filepath2
+    task_status[task_id] = {'status': 'pending'}
+    thread_pool.submit(handle_audio_processing, task_id, temp_filepath, file.filename)
 
-        file.save(temp_filepath)
-        if not file.filename.endswith('.wav'):
-            input_video = temp_filepath
-            file_type   = str(temp_filepath).split('.')[-1]
-            output_audio = str(temp_filepath).replace(file_type, 'wav')
-            if str(output_audio).strip() == 'wav':
-                str1 = '.' + file_type
-                output_audio = temp_filepath.replace(str1, '.wav')
-            extract_audio(input_path=input_video,
-                          output_path=output_audio,
-                          output_format='wav')
-            temp_filepath = output_audio
-        # Process file through queue
-        future = thread_pool.submit(process_queued_request, temp_filepath, file.filename)
-        result = future.result()
+    return jsonify({'success': True, 'task_id': task_id})
 
-        return jsonify(result)
+@app.route('/transcriptions/<task_id>', methods=['GET'])
+def get_summary(task_id):
+    if task_id not in task_status:
+        return jsonify({'success': False, 'error': 'Invalid task ID'}), 404
 
-    except Exception as e:
-        logger.error(f"Error handling file upload: {e}", exc_info=True)
-        sentry_sdk.capture_exception(e)
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+    status = task_status[task_id]
+    if status['status'] == 'pending':
+        return jsonify({'success': True, 'status': 'pending'}), 202
+    elif status['status'] == 'completed':
+        return jsonify({'success': True, 'status': 'completed', 'summary': status['summary']}), 200
+    else:
+        return jsonify({'success': False, 'error': status.get('error', 'Unknown error')}), 500
 
-# Serve files from voice directory
-app.add_url_rule('/voice/<path:filename>', endpoint='voice_files',
-                 view_func=lambda filename: send_from_directory('voice', filename))
+@app.route('/voice/<path:filename>', methods=['GET'])
+def serve_voice_file(filename):
+    return send_from_directory(VOICE_DIR, filename)
 
 if __name__ == '__main__':
-    try:
-        app.run(host='0.0.0.0', port=5000, debug=True)
-    except KeyboardInterrupt:
-        logger.info("Server shutting down...")
-        thread_pool.shutdown(wait=True)
-    except Exception as e:
-        logger.error(f"Error starting server: {e}")
-        sentry_sdk.capture_exception(e)
-    finally:
-        logger.info("Cleanup complete")
+    app.run(host='0.0.0.0', port=5000, debug=True)
