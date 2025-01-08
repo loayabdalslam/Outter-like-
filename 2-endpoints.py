@@ -14,6 +14,13 @@ from audio_extract import extract_audio
 import werkzeug
 import threading
 
+from tinydb import TinyDB, Query
+
+# Initialize TinyDB
+db = TinyDB('database.json', encoding='utf-8', indent=4, ensure_ascii=False, sort_keys=True, separators=(',', ': '))
+db_lock = threading.Lock()
+File = Query()
+
 # Initialize Sentry for error tracking
 sentry_sdk.init(
     dsn="https://cb8037c1a5f827203638c77a613105b0@o4508518491226112.ingest.de.sentry.io/4508518580486224",
@@ -28,7 +35,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        RotatingFileHandler('app.log', maxBytes=1024 * 1024, backupCount=5),
+        RotatingFileHandler('app.log', maxBytes=1024 * 1024, backupCount=5,encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -114,6 +121,10 @@ def upload_file():
             os.rename(upload_path, wav_path)
             logger.info(f"File is already in WAV format: {wav_path}")
 
+        # Store file information in the database
+        with db_lock:
+            db.insert({'file_id': unique_id, 'wav_path': wav_path, 'summary': None})
+
         # Automatically call the second endpoint in a background thread
         app_context = app.app_context()
 
@@ -132,22 +143,28 @@ def run_summary_in_thread(app_context, unique_id):
 @app.route('/summarize', methods=['POST'])
 def summarize_file(file_id: str = None):
     try:
-        print("i am here")
-        if not file_id:
-            data = request.json
-            if 'file_id' not in data:
-                return jsonify(success=False, error="No file ID provided"), 400
-            file_id = data['file_id']
 
-        wav_path = os.path.join(WAV_DIR, f"{file_id}.wav")
+        # Retrieve the file path from the database
+        result = db.search(File.file_id == file_id)
+        if not result:
+            logger.error(f"No file found with ID: {file_id}")
+            return
+
+        wav_path = result[0]['wav_path']
 
         if not os.path.exists(wav_path):
-            return jsonify(success=False, error="File not found"), 404
-
+            logger.error(f"WAV file not found: {wav_path}")
+            return
         # Transcribe and summarize the WAV file
         logger.info(f"Starting transcription for file: {wav_path}")
         summary = audio_processor.transcribe_audio(wav_path)
+        summary = summary.replace('\n', ' ')
+        summary = summary.replace('**', ' ')
         logger.info(f"Transcription completed for file: {wav_path}")
+        # Update the summary in the database
+        with db_lock:
+            db.update({'summary': summary}, File.file_id == file_id)
+        logger.info(f"Summary updated for file: {file_id}")
 
         # Save transcription
         transcription_path = os.path.join(TRANSCRIPTION_DIR, f"{file_id}_transcription.json")
