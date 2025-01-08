@@ -136,9 +136,12 @@ def upload_file():
         logger.error(f"Error uploading file: {e}", exc_info=True)
         sentry_sdk.capture_exception(e)
         return jsonify(success=False, error=str(e)), 500
+
 def run_summary_in_thread(app_context, unique_id):
     with app_context:  # Push the application context to the thread
         summarize_file(unique_id)
+
+
 # Endpoint 2: Summarize the WAV file
 @app.route('/summarize', methods=['POST'])
 def summarize_file(file_id: str = None):
@@ -176,7 +179,6 @@ def summarize_file(file_id: str = None):
         if os.path.exists(wav_path):
             os.remove(wav_path)
             logger.info(f"WAV file removed: {wav_path}")
-        print("i will print")
         print(f"Summary for file {file_id}: {summary}")
         return jsonify(success=True, summary=summary), 200
 
@@ -189,6 +191,20 @@ def summarize_file(file_id: str = None):
 @app.route('/wav/<path:filename>')
 def serve_wav(filename):
     return send_from_directory(WAV_DIR, filename)
+
+## Adding a GET endpoint that allows users to check the summarization status.
+@app.route('/status/<file_id>', methods=['GET'])
+def get_status(file_id):
+    result = db.search(File.file_id == file_id)
+    if result:
+        summary = result[0].get('summary')
+        if summary:
+            return jsonify(success=True, summary=summary), 200
+        else:
+            return jsonify(success=True, status="Processing"), 200
+    else:
+        return jsonify(success=False, error="File not found"), 404
+
 
 if __name__ == '__main__':
     try:
