@@ -10,10 +10,10 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
-from audio_extract import extract_audio
+
 import werkzeug
 import threading
-
+from moviepy.editor import AudioFileClip
 from tinydb import TinyDB, Query
 
 # Initialize TinyDB
@@ -108,7 +108,8 @@ def upload_file():
         original_filename = werkzeug.utils.secure_filename(file.filename)
         upload_path = os.path.join(UPLOAD_DIR, f"{unique_id}_{original_filename}")
         wav_path = os.path.join(WAV_DIR, f"{unique_id}.wav")
-
+        input_file =None
+        output_file=None   
         # Save the uploaded file
         file.save(upload_path)
         logger.info(f"File saved temporarily at: {upload_path}")
@@ -116,14 +117,21 @@ def upload_file():
         # Convert to WAV format
         if not original_filename.endswith('.wav'):
             logger.info(f"Converting file to WAV: {upload_path} -> {wav_path}")
-            extract_audio(input_path=upload_path, output_path=wav_path, output_format='wav')
+
+            input_file = upload_path
+            output_file = wav_path
+
+            video = AudioFileClip(input_file)
+            video.write_audiofile(output_file)
+
+
         else:
             os.rename(upload_path, wav_path)
-            logger.info(f"File is already in WAV format: {wav_path}")
+            logger.info(f"File is already in WAV format: {output_file}")
 
         # Store file information in the database
         with db_lock:
-            db.insert({'file_id': unique_id, 'wav_path': wav_path, 'summary': None})
+            db.insert({'file_id': unique_id, 'wav_path': output_file, 'summary': None})
 
         # Automatically call the second endpoint in a background thread
         app_context = app.app_context()
