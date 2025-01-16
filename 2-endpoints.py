@@ -76,7 +76,7 @@ class AudioProcessor:
           above.   Focus on the main points discussed and key takeaways, and in addition to that add another Section that has
           the very important details of the meeting and their corresponding explanations in a seperated list to make sure we cover 
           everything but make sure that this section is the last section and it doesn't change the structure we agreed on
-          for important information mentioned above. Format the summary in clear paragraphs with proper punctuation. result should be in {language}.
+          for important information mentioned above. Format the summary in clear paragraphs with proper punctuation. result should be in {language} and in html.
                                     """
 
     def transcribe_audio(self, audio_path: str) -> str:
