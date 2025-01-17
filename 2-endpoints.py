@@ -63,24 +63,28 @@ for dir in [UPLOAD_DIR, WAV_DIR, TRANSCRIPTION_DIR]:
 
 class AudioProcessor:
     def __init__(self, lang='ar'):
-        self.lang = lang
-        self.transcription_prompt = """This is a business meeting
+        self.language = lang
+        self.transcription_prompt = " "
+
+    def transcribe_audio(self, audio_path: str,lang) -> str:
+        try:
+            self.language=lang
+            self.transcription_prompt = f"""This is a business meeting
           you role is an experienced minute taker
 
           THE INPUT: you will be given a meeting and you should do your job as the most experienced minute taker do
 
           The Expected output is : all important information, dates, decisions , tasks and deadlines mentioned in the meeting.
-          ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation
+          ensure documentation of the decisions and actions taken in the meeting, which facilitates their follow-up and implementation.Format the summary in clear paragraphs with proper punctuation. result should be in language {self.language}  and in html format.
 
-          Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you 
+          Please provide a comprehensive summary of the audio content. NOT ALL content just summarize the meeting in the points i have told you
           above.   Focus on the main points discussed and key takeaways, and in addition to that add another Section that has
-          the very important details of the meeting and their corresponding explanations in a seperated list to make sure we cover 
+          the very important details of the meeting and their corresponding explanations in a seperated list to make sure we cover
           everything but make sure that this section is the last section and it doesn't change the structure we agreed on
-          for important information mentioned above. Format the summary in clear paragraphs with proper punctuation. result should be in {language} and in html.
+          for important information mentioned above.
                                     """
 
-    def transcribe_audio(self, audio_path: str) -> str:
-        try:
+
             audio_file = genai.upload_file(path=audio_path)
             response = model.generate_content([self.transcription_prompt, audio_file])
             return response.text
@@ -100,16 +104,23 @@ def upload_file():
             return jsonify(success=False, error="No file provided"), 400
 
         file = request.files['file']
+        lang = request.form.get('lang')
+        logger.info(f" !!!!!!!!!!!  transcribtion at: {lang}")
+        print(type(lang))
         if file.filename == '':
             return jsonify(success=False, error="No file selected"), 400
+        if lang is None:  # Check if 'lang' is None
+            lang = 'of the speaker (what is in arabic make it in arabic and what is in english make it in english)'
 
+        #language of the meeting
+        language=lang.lower()
         # Generate a unique ID for the file
         unique_id = str(uuid.uuid4())
         original_filename = werkzeug.utils.secure_filename(file.filename)
         upload_path = os.path.join(UPLOAD_DIR, f"{unique_id}_{original_filename}")
         wav_path = os.path.join(WAV_DIR, f"{unique_id}.wav")
-        input_file =None
-        output_file=None   
+        input_file = upload_path
+        output_file = wav_path
         # Save the uploaded file
         file.save(upload_path)
         logger.info(f"File saved temporarily at: {upload_path}")
@@ -118,14 +129,15 @@ def upload_file():
         if not original_filename.endswith('.wav'):
             logger.info(f"Converting file to WAV: {upload_path} -> {wav_path}")
 
-            input_file = upload_path
-            output_file = wav_path
+
 
             video = AudioFileClip(input_file)
             video.write_audiofile(output_file)
 
 
         else:
+
+
             os.rename(upload_path, wav_path)
             logger.info(f"File is already in WAV format: {output_file}")
 
@@ -136,7 +148,7 @@ def upload_file():
         # Automatically call the second endpoint in a background thread
         app_context = app.app_context()
 
-        threading.Thread(target=run_summary_in_thread, args=(app_context, unique_id)).start()
+        threading.Thread(target=run_summary_in_thread, args=(app_context, unique_id,language)).start()
 
         return jsonify(success=True, file_id=unique_id), 200
 
@@ -145,14 +157,14 @@ def upload_file():
         sentry_sdk.capture_exception(e)
         return jsonify(success=False, error=str(e)), 500
 
-def run_summary_in_thread(app_context, unique_id):
+def run_summary_in_thread(app_context, unique_id,language):
     with app_context:  # Push the application context to the thread
-        summarize_file(unique_id)
+        summarize_file(language,unique_id)
 
 
 # Endpoint 2: Summarize the WAV file
 @app.route('/summarize', methods=['POST'])
-def summarize_file(file_id: str = None):
+def summarize_file(language,file_id: str = None):
     try:
 
         # Retrieve the file path from the database
@@ -167,8 +179,9 @@ def summarize_file(file_id: str = None):
             logger.error(f"WAV file not found: {wav_path}")
             return
         # Transcribe and summarize the WAV file
+        lang=language
         logger.info(f"Starting transcription for file: {wav_path}")
-        summary = audio_processor.transcribe_audio(wav_path)
+        summary = audio_processor.transcribe_audio(wav_path,lang)
         summary = summary.replace('\n', ' ')
         summary = summary.replace('**', ' ')
         logger.info(f"Transcription completed for file: {wav_path}")
