@@ -107,7 +107,7 @@ def upload_file():
         lang = request.form.get('lang')
         if lang == "ar":
             lang = "arbaic"
-        else if lang == "en":
+        elif lang == "en":
             lang = "english"
         else:
             pass
