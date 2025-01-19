@@ -143,7 +143,7 @@ def upload_file():
 
         # Store file information in the database
         with db_lock:
-            db.insert({'file_id': unique_id, 'wav_path': output_file, 'summary': None})
+            db.insert({"file_id": unique_id, "wav_path": output_file, "summary": None})
 
         # Automatically call the second endpoint in a background thread
         app_context = app.app_context()
