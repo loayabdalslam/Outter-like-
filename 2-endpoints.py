@@ -105,6 +105,14 @@ def upload_file():
 
         file = request.files['file']
         lang = request.form.get('lang')
+        if lang == "ar":
+            lang = "arbaic"
+        else if lang == "en":
+            lang = "english"
+        else:
+            pass
+
+        
         logger.info(f" !!!!!!!!!!!  transcribtion at: {lang}")
         print(type(lang))
         if file.filename == '':
